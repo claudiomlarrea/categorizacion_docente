@@ -1,7 +1,7 @@
-
-import re
+import re, unicodedata, zipfile
 from typing import Dict, Tuple
 
+# Docx readers (python-docx -> fallback a docx2txt -> raw XML)
 try:
     from docx import Document  # python-docx
 except Exception:
@@ -12,10 +12,14 @@ try:
 except Exception:
     docx2txt = None
 
-import zipfile
-
 class PDFSupportMissing(Exception):
     pass
+
+def _normalize(s: str) -> str:
+    # minúsculas, sin tildes, espacios normalizados
+    s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
+    s = re.sub(r"\s+", " ", s.lower()).strip()
+    return s
 
 def extract_text_from_docx(path: str) -> str:
     if Document is not None:
@@ -23,6 +27,7 @@ def extract_text_from_docx(path: str) -> str:
         return "\n".join([p.text for p in doc.paragraphs])
     if docx2txt is not None:
         return docx2txt.process(path) or ""
+    # Raw XML fallback
     try:
         with zipfile.ZipFile(path) as z:
             xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
@@ -34,9 +39,9 @@ def extract_text_from_docx(path: str) -> str:
 
 def extract_text_from_pdf(path: str) -> str:
     try:
-        import pdfplumber  # lazy import; optional
+        import pdfplumber  # lazy import; opcional
     except Exception as e:
-        raise PDFSupportMissing("pdfplumber no está instalado.") from e
+        raise PDFSupportMissing("pdfplumber no esta instalado.") from e
     texts = []
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
@@ -52,106 +57,149 @@ def extract_text(file_path: str) -> Tuple[str, str]:
     elif lower.endswith(".txt"):
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read(), "txt"
+    elif lower.endswith(".doc"):
+        raise ValueError("Formato .DOC (Word 97-2003) no soportado. Convertir a .DOCX o PDF.")
     else:
         raise ValueError("Formato no soportado. Use .docx, .pdf o .txt")
 
-def find_int(text: str, pattern: str, default: int = 0) -> int:
-    m = re.search(pattern, text, flags=re.IGNORECASE)
-    if not m:
-        return default
-    for g in (m.groups() or (m.group(0),)):
-        if g and re.search(r"\d+", g):
-            try:
-                return int(re.search(r"\d+", g).group())
-            except Exception:
-                pass
-    return default
+# ---------------- DETECTORES ----------------
+
+def _count(rx: str, t: str) -> int:
+    return len(re.findall(rx, t, flags=re.IGNORECASE))
+
+def _has(rx: str, t: str) -> int:
+    return 1 if re.search(rx, t, flags=re.IGNORECASE) else 0
 
 def detect_counts(text: str) -> Dict[str, int]:
+    """
+    Devuelve contadores por clave del valorador. Aplica normalización para robustez.
+    """
+    t = _normalize(text)
     c: Dict[str, int] = {}
-    # Formación
-    c["formacion:doctorado"] = 1 if re.search(r"\bdoctorado\b", text, re.I) else 0
-    c["formacion:maestria"] = len(re.findall(r"maestr[ií]a", text, re.I))
-    c["formacion:especializacion"] = len(re.findall(r"especializaci[oó]n", text, re.I))
-    c["formacion:diplomatura"] = len(re.findall(r"\bdiplomatura\b", text, re.I))
-    c["formacion:segundo_grado"] = 1 if re.search(r"segundo t[ií]tulo de grado|doble t[ií]tulo de grado", text, re.I) else 0
-    c["formacion:cursos_posgrado"] = find_int(text, r"cursos? de posgrado:\s*(\d+)", 0)
-    c["formacion:posdoc"] = len(re.findall(r"posdoc|posdoctorad", text, re.I))
-    c["formacion:idiomas"] = len(re.findall(r"idioma[s]?|ingl[eé]s certificado|TOEFL|IELTS", text, re.I))
-    c["formacion:estancias"] = find_int(text, r"pasant[ií]as?\s*\((\d+)\)", 0) or len(re.findall(r"\bestancia|\bpasant[ií]a", text, re.I))
 
-    # Docencia (años)
-    c["docencia:titular"] = find_int(text, r"titular.*?\((\d+)\s*a[nñ]os?\)", 0)
-    c["docencia:asociado"] = find_int(text, r"asociad[oa].*?\((\d+)\s*a[nñ]os?\)", 0)
-    c["docencia:adjunto"] = find_int(text, r"adjunt[oa].*?\((\d+)\s*a[nñ]os?\)", 0)
-    c["docencia:jtp"] = find_int(text, r"(?:trabajos pr[aá]cticos|ayudant[eé]).*?\((\d+)\s*a[nñ]os?\)", 0)
-    c["docencia:posgrado"] = find_int(text, r"posgrado acreditados? \((\d+)\s*cursos?\)", 0)
+    # ---------- FORMACION ----------
+    c["formacion:doctorado"] = _has(r"\bdoctorado\b", t)
+    c["formacion:maestria"] = _count(r"\bmaestria\b", t)
+    c["formacion:especializacion"] = _count(r"\bespecializacion\b", t)
+    c["formacion:diplomatura"] = _count(r"\bdiplomatura\b", t)
+    c["formacion:segundo_grado"] = _has(r"segundo titulo de grado|doble titulo de grado", t)
+    m = re.search(r"(?:cursos? de posgrado|cursos? de postgrado|cursos? de especializacion).*?(\d+)", t)
+    c["formacion:cursos_posgrado"] = int(m.group(1)) if m else 0
+    c["formacion:posdoc"] = _count(r"\bposdoc(?:torado)?\b", t)
+    c["formacion:idiomas"] = _count(r"\bidioma[s]?\b|ingles certificado|toefl|ielts|b2|c1|c2", t)
+    m = re.search(r"(?:estancia|pasantia)[^0-9]{0,20}(\d+)", t)
+    c["formacion:estancias"] = int(m.group(1)) if m else _count(r"\bestancia\b|\bpasantia\b", t)
 
-    # Gestión
-    c["gestion:rector"] = 1 if re.search(r"\brector[ao]\b", text, re.I) else 0
-    c["gestion:vicerrector"] = 1 if re.search(r"vicerrector[ao]|directorio", text, re.I) else 0
-    c["gestion:decano"] = 1 if re.search(r"\bdecano\b|director[ae] de facultad|director instituto", text, re.I) else 0
-    c["gestion:secretario"] = 1 if re.search(r"secretari[oa] (acad[eé]mica|de investigaci[oó]n|de extensi[oó]n)", text, re.I) else 0
-    c["gestion:coordinador"] = 1 if re.search(r"coordinador[ae] de carrera|responsable de programas", text, re.I) else 0
-    c["gestion:consejero"] = 1 if re.search(r"consejer[oa] (superior|directivo|de facultad)", text, re.I) else 0
+    # ---------- DOCENCIA ----------
+    def _get_years(rx):
+        m = re.search(rx, t)
+        return int(m.group(1)) if m else 0
+    c["docencia:titular"] = _get_years(r"titular[^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
+    c["docencia:asociado"] = _get_years(r"asociad[oa][^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
+    c["docencia:adjunto"] = _get_years(r"adjunt[oa][^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
+    c["docencia:jtp"] = _get_years(r"(?:trabajos practicos|ayudante)[^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
+    c["docencia:posgrado"] = _get_years(r"posgrado[^0-9]{0,20}(\d+)\s*cursos?")
 
-    # Otros cargos
-    c["otroscargos:funciones"] = find_int(text, r"comisiones internas \((\d+)\s*funciones\)", 0) or len(re.findall(r"comisi[oó]n interna", text, re.I))
+    # ---------- GESTION ----------
+    c["gestion:rector"] = _has(r"\brector(?:a|ado)?\b", t)
+    c["gestion:vicerrector"] = _has(r"\bvicerrector(?:a)?\b|directorio", t)
+    c["gestion:decano"] = _has(r"\bdecano\b|director[ae] de facultad|director instituto", t)
+    c["gestion:secretario"] = _has(r"secretari[oa] (academica|de investigacion|de extension)", t)
+    c["gestion:coordinador"] = _has(r"coordinador[ae] de carrera|responsable de programas", t)
+    c["gestion:consejero"] = _has(r"consejer[oa] (superior|directivo|de facultad)", t)
 
-    # CyT formación RRHH
-    c["ciencia:dir_doctorandos"] = find_int(text, r"direcci[oó]n de (\d+) doctorandos?", 0)
-    c["ciencia:dir_maestria"] = find_int(text, r"direcci[oó]n de (\d+) maestrandos?", 0)
-    c["ciencia:dir_grado"] = find_int(text, r"direcci[oó]n de (\d+) tesistas de grado", 0)
-    c["ciencia:becarios"] = find_int(text, r"(\d+)\s*becarios? (conicet|agencia)", 0)
+    # ---------- OTROS CARGOS ----------
+    m = re.search(r"comisiones? internas?[^0-9]{0,20}(\d+)\s*funciones?", t)
+    c["otroscargos:funciones"] = int(m.group(1)) if m else _count(r"comision interna", t)
 
-    # Proyectos I+D
-    c["proyectos:direccion"] = find_int(text, r"direcci[oó]n de (\d+) proyectos", 0)
-    c["proyectos:codireccion"] = find_int(text, r"co-?direcci[oó]n de (\d+) proyectos", 0)
-    c["proyectos:participacion"] = find_int(text, r"participaci[oó]n en (\d+) proyectos", 0)
-    c["proyectos:coordinacion"] = find_int(text, r"coordinaci[oó]n de (\d+) equipo", 0)
+    # ---------- FORMACION RRHH ----------
+    def _num(rx):
+        m = re.search(rx, t)
+        return int(m.group(1)) if m else 0
+    c["ciencia:dir_doctorandos"] = _num(r"direccion de (\d+) doctorand")
+    c["ciencia:dir_maestria"] = _num(r"direccion de (\d+) maestrand")
+    c["ciencia:dir_grado"] = _num(r"direccion de (\d+) tesis(?:tas)? de grado")
+    c["ciencia:becarios"] = _num(r"(\d+)\s*becarios? (?:conicet|agencia)")
 
-    # Extensión
-    c["extension:tutorias"] = find_int(text, r"tutor[ií]as? de (\d+) pasant[ií]as?", 0)
-    c["extension:transferencia"] = find_int(text, r"(\d+)\s*(actividades?|acciones?) de transferencia", 0)
-    c["extension:eventos_cientificos"] = find_int(text, r"(\d+)\s*(conferencias?|panel(es)?|exposiciones?)", 0)
+    # ---------- PROYECTOS ----------
+    c["proyectos:direccion"] = _num(r"(?:direccion|dir\.) de (\d+) proyectos?")
+    c["proyectos:codireccion"] = _num(r"co-?direccion de (\d+) proyectos?")
+    c["proyectos:participacion"] = _num(r"participacion en (\d+) proyectos?")
+    c["proyectos:coordinacion"] = _num(r"coordinacion de (\d+) equipo")
 
-    # Evaluación
-    c["eval:tribunal_grado"] = find_int(text, r"jurado de (\d+) tesis de grado", 0)
-    c["eval:tribunal_posgrado"] = find_int(text, r"jurado de (\d+) tesis de posgrado", 0)
-    c["eval:eval_proyectos"] = find_int(text, r"evaluadora? de (\d+) proyectos? I\+D", 0)
-    c["eval:eval_revistas"] = find_int(text, r"revistas? cient[ií]ficas.*?(\d+)", 0)
-    c["eval:eval_institucional"] = find_int(text, r"evaluadora? institucional.*?(\d+)", 0)
+    # ---------- EXTENSION ----------
+    c["extension:tutorias"] = _num(r"tutorias? de (\d+) pasant")
+    c["extension:transferencia"] = _num(r"(\d+)\s*(?:actividades?|acciones?) de transferencia")
+    c["extension:eventos_cientificos"] = _num(r"(\d+)\s*(?:conferencias?|panel(?:es)?|exposiciones?)")
 
-    # Otras actividades
-    c["otras:comites_redes"] = find_int(text, r"participaci[oó]n en (\d+) redes", 0) or len(re.findall(r"red(es)? acad[eé]mica", text, re.I))
-    c["otras:ejercicio_prof"] = find_int(text, r"extraacad[eé]mico.*?(\d+) a[nñ]os?", 0)
+    # ---------- EVALUACION ----------
+    c["eval:tribunal_grado"] = _num(r"jurado de (\d+) tesis de grado")
+    c["eval:tribunal_posgrado"] = _num(r"jurado de (\d+) tesis de posgrado")
+    c["eval:eval_revistas"] = max(
+        _num(r"evaluador(?:a)? de (\d+) (?:revistas?|congresos?|jornadas?)"),
+        _count(r"\b(revisor|arbitro|reviewer)\b", t)
+    )
+    c["eval:eval_proyectos"] = max(
+        _num(r"evaluador(?:a)? de (\d+) proyectos?\s*(?:i\+d|investigacion)?"),
+        _count(r"\bevaluador(?:a)? de proyectos\b", t)
+    )
+    c["eval:eval_institucional"] = max(
+        _num(r"evaluacion institucional.*?(\d+)"),
+        _count(r"\bevaluacion institucional\b", t)
+    )
 
-    # Publicaciones
-    c["pubs:con_referato"] = find_int(text, r"(\d+) art[íi]culos? con referato|indexad", 0)
-    c["pubs:sin_referato"] = find_int(text, r"(\d+) art[íi]culos? sin referato", 0)
-    c["pubs:libros"] = find_int(text, r"(\d+) libros? con ISBN", 0) or len(re.findall(r"libro[s]? con ISBN", text, re.I))
-    c["pubs:capitulos"] = find_int(text, r"(\d+) cap[ií]tulos? de libro", 0)
-    c["pubs:documentos"] = find_int(text, r"(\d+) documentos? t[eé]cnicos?", 0)
+    # ---------- OTRAS ACTIVIDADES ----------
+    c["otras:comites_redes"] = max(
+        _num(r"participacion en (\d+) redes"),
+        _count(r"red(?:es)? academicas?|comite(s)?", t)
+    )
+    c["otras:ejercicio_prof"] = _num(r"extraacademico.*?(\d+)\s*a(?:n|ñ)os?")
 
-    # Desarrollos
-    c["desarrollos:software_patente"] = find_int(text, r"(\d+) softwares? registrados?|patentes?", 0)
-    c["desarrollos:procesos"] = find_int(text, r"(\d+) procesos? de gesti[oó]n", 0)
+    # ---------- PUBLICACIONES ----------
+    c["pubs:con_referato"] = max(
+        _num(r"(\d+) articulos? con referato"),
+        _count(r"articulos? (?:indexad|con referato)", t)
+    )
+    c["pubs:sin_referato"] = _num(r"(\d+) articulos? sin referato")
+    c["pubs:libros"] = max(
+        _num(r"(\d+) libros? con isbn"),
+        _count(r"\blibro[s]? con isbn\b", t)
+    )
+    c["pubs:capitulos"] = _num(r"(\d+) capitulos? de libro")
+    c["pubs:documentos"] = _num(r"(\d+) documentos? tecnicos?")
 
-    # Servicios
-    c["servicios:tecnicos"] = find_int(text, r"(\d+) servicios? t[eé]cnicos?", 0)
-    c["servicios:informes"] = find_int(text, r"(\d+) informes? t[eé]cnicos?", 0)
+    # ---------- DESARROLLOS ----------
+    c["desarrollos:software_patente"] = max(
+        _num(r"(\d+) softwares? registrados?"),
+        _num(r"(\d+) patentes?")
+    )
+    c["desarrollos:procesos"] = _num(r"(\d+) procesos? de gestion")
 
-    # Redes / Editorial / Eventos
-    c["redes:participacion"] = find_int(text, r"miembro de (\d+) redes?", 0)
-    c["redes:organizacion_eventos"] = find_int(text, r"organizaci[oó]n de (\d+) congresos?", 0)
-    ge = 0
-    ge += find_int(text, r"editora? asociad[oa] en (\d+) revistas?", 0)
-    ge += find_int(text, r"comit[eé] editorial de (\d+) revistas?", 0)
-    c["redes:gestion_editorial"] = ge
+    # ---------- SERVICIOS ----------
+    c["servicios:tecnicos"] = _num(r"(\d+) servicios? tecnicos?")
+    c["servicios:informes"] = _num(r"(\d+) informes? tecnicos?")
 
-    # Premios
-    c["premios:internacional"] = find_int(text, r"(\d+) premio[s]? internacional(es)?", 0)
-    c["premios:nacional"] = find_int(text, r"(\d+) premios? nacionales?", 0)
-    c["premios:distinciones"] = find_int(text, r"(\d+) distinciones?", 0)
+    # ---------- REDES / EDITORIAL / EVENTOS ----------
+    c["redes:participacion"] = max(
+        _num(r"miembro de (\d+) redes?"),
+        _count(r"\b(membresia|miembro|socio|asociado|integrante)\b", t)
+    )
+    c["redes:organizacion_eventos"] = max(
+        _num(r"organizacion de (\d+) (?:congresos?|jornadas?|seminarios?)"),
+        _count(r"(comite (?:organizador|cientifico)|coordinacion) de (?:congreso|jornada|seminario|evento)", t)
+    )
+    c["redes:gestion_editorial"] = max(
+        _num(r"comite editorial de (\d+) revistas?"),
+        _count(r"\b(editor(?:a)?(?: asociado[a]?| en jefe)?|comite editorial)\b", t)
+    )
+
+    # ---------- PREMIOS ----------
+    total_premios = _count(r"\bpremio[s]?\b|\bdistincion(?:es)?\b|\bmencion(?:es)?\b|\breconocimiento[s]?\b", t)
+    premios_int = _count(r"\binternac", t)
+    premios_nac = _count(r"\bnacional", t)
+    c["premios:internacional"] = premios_int
+    c["premios:nacional"] = max(premios_nac - premios_int, 0)
+    resto = max(total_premios - c["premios:internacional"] - c["premios:nacional"], 0)
+    c["premios:distinciones"] = resto
 
     return c
