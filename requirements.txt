@@ -1,6 +1,7 @@
 streamlit==1.38.0
 pandas==2.2.2
 docx2txt==0.8
+pdfplumber==0.11.4
 # pdf opcional (agregar luego de que abra):
 # pdfplumber==0.11.4
 # evitar por ahora (requiere lxml y puede colgar en 3.13):
