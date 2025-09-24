@@ -1,8 +1,8 @@
-
 import streamlit as st
 import pandas as pd
 from scoring import RULES, SECTION_LIMITS, sum_with_section_caps
 from parsers import extract_text, detect_counts, PDFSupportMissing
+from report import build_docx_report
 
 st.set_page_config(page_title="Categorizador Docente en Investigación", page_icon="📊", layout="wide")
 st.title("📊 Categorizador Docente en Investigación")
@@ -11,14 +11,20 @@ st.caption("Lee CV en .docx/.pdf/.txt y aplica el valorador con topes por ítem 
 with st.expander("Instrucciones", expanded=True):
     st.markdown(
         """
-        1) Subí tu CV (.docx/.pdf/.txt). Recomendado: .docx.
+        1) Subí tu CV (.docx/.pdf/.txt). Recomendado: **.docx**.
         2) La app detecta cantidades con expresiones regulares (heurísticas).
         3) Se aplican topes por ítem, sub-sección y sección.
-        4) Podés descargar el desglose de ítems en CSV.
+        4) Podés descargar el **desglose en CSV** o un **informe .docx**.
+
+        **Nota:** archivos **.doc** (Word 97-2003) no están soportados. Convertir a .docx o PDF.
         """
     )
 
-uploaded = st.file_uploader("Subí tu CV", type=["docx", "pdf", "txt"])
+uploaded = st.file_uploader(
+    "Subí tu CV",
+    type=["docx", "pdf", "txt"],
+    help="Formatos admitidos: DOCX, PDF, TXT. El .DOC (Word 97-2003) no está soportado."
+)
 
 def compute_scores(counts: dict):
     item_rows = []
@@ -56,6 +62,7 @@ if uploaded:
     try:
         text, kind = extract_text(tmp_path)
         st.success(f"Archivo leído como {kind.upper()} – longitud: {len(text)} caracteres")
+
         counts = detect_counts(text)
         df_items, totals = compute_scores(counts)
 
@@ -73,13 +80,31 @@ if uploaded:
         ]
         st.table(pd.DataFrame([(k, totals.get(k, 0)) for k in show_keys], columns=["Sección", "Puntaje"]))
 
+        # Descarga CSV
         csv = df_items.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Descargar desglose (CSV)", data=csv, file_name="desglose_items.csv", mime="text/csv")
+
+        # Informe Word
+        with st.expander("📄 Generar informe en Word", expanded=True):
+            col1, col2 = st.columns(2)
+            docente = col1.text_input("Nombre del docente (opcional)")
+            institucion = col2.text_input("Institución (opcional)")
+            report_bytes = build_docx_report(df_items, totals, meta={"docente": docente, "institucion": institucion})
+            nombre_archivo = "Informe_Valorador.docx" if not docente else f"Informe_Valorador_{docente.replace(' ', '_')}.docx"
+            st.download_button(
+                "⬇️ Descargar informe en Word (.docx)",
+                data=report_bytes,
+                file_name=nombre_archivo,
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True
+            )
 
         with st.expander("Debug: Conteos detectados", expanded=False):
             st.json(counts)
 
     except PDFSupportMissing:
         st.error("No se pudo leer el PDF porque **pdfplumber** no está instalado en esta instancia. Subí el CV en **.docx** o **.txt** o agregá `pdfplumber` a requirements.txt y reiniciá la app.")
+    except ValueError as ve:
+        st.error(str(ve))
 else:
     st.info("Subí un CV de prueba (por ejemplo, el CV_Docente_Ejemplo.docx) para calcular el puntaje.")
