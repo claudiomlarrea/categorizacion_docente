@@ -1,3 +1,4 @@
+
 import re
 from typing import Dict, Tuple
 
@@ -11,8 +12,10 @@ try:
 except Exception:
     docx2txt = None
 
-import pdfplumber
 import zipfile
+
+class PDFSupportMissing(Exception):
+    pass
 
 def extract_text_from_docx(path: str) -> str:
     if Document is not None:
@@ -30,6 +33,10 @@ def extract_text_from_docx(path: str) -> str:
         return ""
 
 def extract_text_from_pdf(path: str) -> str:
+    try:
+        import pdfplumber  # lazy import; optional
+    except Exception as e:
+        raise PDFSupportMissing("pdfplumber no está instalado.") from e
     texts = []
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
@@ -52,7 +59,6 @@ def find_int(text: str, pattern: str, default: int = 0) -> int:
     m = re.search(pattern, text, flags=re.IGNORECASE)
     if not m:
         return default
-    # busca el primer grupo que contenga dígitos
     for g in (m.groups() or (m.group(0),)):
         if g and re.search(r"\d+", g):
             try:

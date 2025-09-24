@@ -1,8 +1,8 @@
+
 import streamlit as st
 import pandas as pd
-from io import BytesIO
-from scoring import RULES, SECTION_LIMITS, GLOBAL_LIMITS, ItemRule, sum_with_section_caps
-from parsers import extract_text, detect_counts
+from scoring import RULES, SECTION_LIMITS, sum_with_section_caps
+from parsers import extract_text, detect_counts, PDFSupportMissing
 
 st.set_page_config(page_title="Categorizador Docente en Investigación", page_icon="📊", layout="wide")
 st.title("📊 Categorizador Docente en Investigación")
@@ -53,31 +53,33 @@ if uploaded:
     tmp_path = f"/tmp/{uploaded.name}"
     with open(tmp_path, "wb") as f:
         f.write(uploaded.getbuffer())
+    try:
+        text, kind = extract_text(tmp_path)
+        st.success(f"Archivo leído como {kind.upper()} – longitud: {len(text)} caracteres")
+        counts = detect_counts(text)
+        df_items, totals = compute_scores(counts)
 
-    text, kind = extract_text(tmp_path)
-    st.success(f"Archivo leído como {kind.upper()} – longitud: {len(text)} caracteres")
-    counts = detect_counts(text)
+        st.subheader("Desglose por ítem")
+        st.dataframe(df_items, use_container_width=True)
 
-    df_items, totals = compute_scores(counts)
+        st.subheader("Subtotales por sección (con topes)")
+        show_keys = [
+            "2:Formacion_total",
+            "3:Cargos_total",
+            "4:CyT_total",
+            "5:Producciones_total",
+            "6:Otros_total",
+            "TOTAL_GENERAL"
+        ]
+        st.table(pd.DataFrame([(k, totals.get(k, 0)) for k in show_keys], columns=["Sección", "Puntaje"]))
 
-    st.subheader("Desglose por ítem")
-    st.dataframe(df_items, use_container_width=True)
+        csv = df_items.to_csv(index=False).encode("utf-8")
+        st.download_button("⬇️ Descargar desglose (CSV)", data=csv, file_name="desglose_items.csv", mime="text/csv")
 
-    st.subheader("Subtotales por sección (con topes)")
-    show_keys = [
-        "2:Formacion_total",
-        "3:Cargos_total",
-        "4:CyT_total",
-        "5:Producciones_total",
-        "6:Otros_total",
-        "TOTAL_GENERAL"
-    ]
-    st.table(pd.DataFrame([(k, totals.get(k, 0)) for k in show_keys], columns=["Sección", "Puntaje"]))
+        with st.expander("Debug: Conteos detectados", expanded=False):
+            st.json(counts)
 
-    csv = df_items.to_csv(index=False).encode("utf-8")
-    st.download_button("⬇️ Descargar desglose (CSV)", data=csv, file_name="desglose_items.csv", mime="text/csv")
-
-    with st.expander("Debug: Conteos detectados", expanded=False):
-        st.json(counts)
+    except PDFSupportMissing:
+        st.error("No se pudo leer el PDF porque **pdfplumber** no está instalado en esta instancia. Subí el CV en **.docx** o **.txt** o agregá `pdfplumber` a requirements.txt y reiniciá la app.")
 else:
     st.info("Subí un CV de prueba (por ejemplo, el CV_Docente_Ejemplo.docx) para calcular el puntaje.")
