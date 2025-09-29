@@ -25,7 +25,7 @@ def extract_text_from_docx(path: str) -> str:
             return txt
     except Exception:
         pass
-    # 2) python-docx
+    # 2) python-docx (incluye tablas)
     try:
         from docx import Document
         doc = Document(path)
@@ -43,7 +43,7 @@ def extract_text_from_docx(path: str) -> str:
             return "\n".join(parts)
     except Exception:
         pass
-    # 3) Raw XML
+    # 3) XML crudo
     try:
         with zipfile.ZipFile(path) as z:
             xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
@@ -170,26 +170,56 @@ def detect_counts(text: str) -> Dict[str, int]:
     c["otras:ejercicio_prof"] = _num(r"extraacademico.*?(\d+)\s*a(?:n|ñ)os?", t)
 
     # ---------- PUBLICACIONES (PRODUCCIONES) ----------
-    peer_tokens = r"(peer ?review|arbitra|referato|indexad|scopus|wos|jcr|science citation|sci)"
-    c["pubs:con_referato"] = max(
-        _num(r"(\d+)\s*articulos?\s*con\s*referato", t),
-        _count(r"(articulo|article|paper).{0,80}(revista|journal|issn|%s)" % peer_tokens, t),
-        min(_count(r"\bissn\b", t), _count(r"\barticul", t))  # fallback conservador
-    )
+    # Heurísticas robustas para CVs: DOI/ISSN/ISBN por línea, sin exigir la palabra "articulo".
+    lines = t.split("\n")
+
+    # DOIs únicos (muy confiables para artículos)
+    dois = set(re.findall(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+\b", t, flags=re.I))
+
+    # ISBN y ISSN marcados
+    # (permitimos espacios entre letras en PDFs raros: i s b n / i s s n)
+    isbn_token = re.compile(r"i\s*s\s*b\s*n", re.I)
+    issn_token = re.compile(r"i\s*s\s*s\s*n", re.I)
+
+    libro_count = 0
+    cap_count = 0
+    issn_lines = 0
+
+    for ln in lines:
+        has_isbn = bool(isbn_token.search(ln))
+        has_issn = bool(issn_token.search(ln))
+        if has_isbn:
+            if re.search(r"\bcapitul|chapter\b", ln, flags=re.I):
+                cap_count += 1
+            else:
+                libro_count += 1
+        if has_issn:
+            # Evito confundir con líneas de libro que traigan ISSN incidental
+            if not has_isbn and not re.search(r"\bcapitul|chapter|libro\b", ln, flags=re.I):
+                issn_lines += 1
+
+    # Artículos con referato: preferimos DOIs, si no ISSN por línea,
+    # y como respaldo, líneas con 'journal|revista' sin ISBN.
+    journal_lines = 0
+    for ln in lines:
+        if re.search(r"\b(journal|revista)\b", ln, flags=re.I) and not isbn_token.search(ln):
+            journal_lines += 1
+
+    c["pubs:con_referato"] = max(len(dois), issn_lines, journal_lines)
+
+    # Artículos sin referato: palabras clave típicas
     c["pubs:sin_referato"] = max(
         _num(r"(\d+)\s*articulos?\s*sin\s*referato", t),
-        _count(r"(articulo|article).{0,80}(divulgacion|boletin|sin\s*referato)", t)
+        _count(r"(divulgacion|boletin|articulo de opinion|nota periodistica)", t)
     )
-    c["pubs:libros"] = max(
-        _num(r"(\d+)\s*libros?", t),
-        _count(r"\blibro[s]?\b.{0,40}\bisbn\b", t)
-    )
-    c["pubs:capitulos"] = max(
-        _num(r"(\d+)\s*capitulos?\s*de\s*libro", t),
-        _count(r"\bcapitulo[s]?\b.{0,60}\b(libro|isbn)\b", t)
-    )
+
+    # Libros y capítulos por ISBN en línea
+    c["pubs:libros"] = libro_count
+    c["pubs:capitulos"] = cap_count
+
+    # Documentos técnicos / informes
     c["pubs:documentos"] = max(
-        _num(r"(\d+)\s*documentos?\s*tecnicos?", t),
+        _num(r"(\d+)\s*(?:documentos?|informes?)\s*tecnicos?", t),
         _count(r"(informe|documento|manual|guia).{0,20}tecnic", t)
     )
 
