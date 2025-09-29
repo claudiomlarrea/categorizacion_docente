@@ -1,239 +1,190 @@
 # parsers.py
-# v2025-09-29 — Reglas estrictas para Formación y mejor detección de Producciones.
-
-from __future__ import annotations
 import io, re, unicodedata
-from typing import List, Tuple, Dict
-import pandas as pd
+from typing import Dict, Tuple, List, Set
 
-# ---------------------------------------------------------------------
-# Excepción para soporte PDF opcional (la usa streamlit_app.py)
-# ---------------------------------------------------------------------
+# --- Excepción para soporte PDF opcional ---
 class PDFSupportMissing(Exception):
     pass
 
-# ---------------------------------------------------------------------
-# Normalización de texto
-# ---------------------------------------------------------------------
+# --- Normalización básica ---
 def _strip_accents(s: str) -> str:
-    nfkd = unicodedata.normalize("NFKD", s)
-    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+    return ''.join(c for c in unicodedata.normalize('NFKD', s) if not unicodedata.combining(c))
 
-def _norm(s: str) -> str:
-    s = s.replace("\x0c", "\n")  # saltos de página PDF
-    s = _strip_accents(s)
-    s = s.lower()
-    s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{2,}", "\n", s)
+def _normalize(s: str) -> str:
+    s = _strip_accents(s).lower()
+    s = s.replace('\r', '\n')
+    s = re.sub(r'[ \t]+', ' ', s)
+    s = re.sub(r'\n+', '\n', s)
     return s
 
-# ---------------------------------------------------------------------
-# Lectura de archivos
-# ---------------------------------------------------------------------
-def extract_text(uploaded_file) -> Tuple[str, str]:
-    """Devuelve (texto_normalizado, tipo: DOCX|PDF|TXT)."""
-    name = (uploaded_file.name or "").lower()
-    raw = uploaded_file.read()
+def _find_section(text_norm: str, start_key: str, stop_keys: List[str]) -> str:
+    """Devuelve el bloque desde start_key hasta el próximo encabezado (stop_keys) o fin."""
+    i = text_norm.find(start_key)
+    if i < 0:
+        return ""
+    j_candidates = [text_norm.find(k, i + len(start_key)) for k in stop_keys]
+    j_candidates = [j for j in j_candidates if j != -1]
+    j = min(j_candidates) if j_candidates else len(text_norm)
+    return text_norm[i:j]
 
-    if name.endswith(".docx"):
-        import docx2txt
-        text = docx2txt.process(io.BytesIO(raw)) or ""
-        return _norm(text), "DOCX"
+def _unique_titles(matches: List[str]) -> Set[str]:
+    cleaned = []
+    for m in matches:
+        m = re.sub(r'\s+', ' ', m).strip()
+        # acorta títulos larguísimos
+        cleaned.append(m[:120])
+    return set(cleaned)
 
+# --- Extracción de texto ---
+def extract_text(file_bytes: bytes, filename: str) -> str:
+    name = filename.lower()
     if name.endswith(".pdf"):
         try:
             import pdfplumber  # lazy import
-        except Exception as e:
-            raise PDFSupportMissing("pdfplumber_not_installed") from e
-        with pdfplumber.open(io.BytesIO(raw)) as pdf:
-            pages = [(p.extract_text() or "") for p in pdf.pages]
-        return _norm("\n".join(pages)), "PDF"
+        except Exception:
+            raise PDFSupportMissing("pdfplumber no está instalado")
+        text = []
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            for p in pdf.pages:
+                txt = p.extract_text() or ""
+                text.append(txt)
+        return "\n".join(text)
 
-    if name.endswith(".txt"):
-        return _norm(raw.decode("utf-8", errors="ignore")), "TXT"
+    elif name.endswith(".docx"):
+        # 1) rápido
+        try:
+            import docx2txt
+            return docx2txt.process(io.BytesIO(file_bytes)) or ""
+        except Exception:
+            pass
+        # 2) fallback
+        from docx import Document
+        doc = Document(io.BytesIO(file_bytes))
+        return "\n".join(p.text for p in doc.paragraphs)
 
-    if name.endswith(".doc"):
-        # viejo Word 97-2003: no lo procesamos para evitar falsos positivos
-        raise ValueError("Los archivos .doc (97-2003) no se soportan. Convertir a .docx o PDF.")
+    else:
+        # .txt u otros
+        try:
+            return file_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            return file_bytes.decode("latin-1", errors="ignore")
 
-    # fallback
-    return _norm(raw.decode("utf-8", errors="ignore")), "TXT"
+# --- Reglas de conteo ---
+def detect_counts(raw_text: str) -> Dict[str, int]:
+    t = _normalize(raw_text)
 
-# ---------------------------------------------------------------------
-# Utilidades de búsqueda contextual
-# ---------------------------------------------------------------------
-def _find_with_context(
-    text: str,
-    core_pattern: str,
-    must_in_window: List[str] | None = None,
-    forbid_left: List[str] | None = None,
-    window: int = 80,
-) -> int:
-    """
-    Cuenta ocurrencias del patrón principal siempre que:
-      - en la ventana +/- 'window' haya alguna palabra obligatoria (must_in_window),
-      - y a la izquierda inmediata NO aparezcan palabras de exclusión (forbid_left).
-    """
-    must_in_window = must_in_window or []
-    forbid_left = forbid_left or []
+    # Delimitadores de secciones frecuentes en CVar / CVs
+    sec_acad = "formacion academica"
+    sec_comp = "formacion complementaria"
+    stop = [
+        "formacion complementaria", "actividades", "antecedentes", "publicaciones",
+        "libros", "experiencia", "cargos", "docencia", "ciencia y tecnologia",
+        "otros antecedentes", "premios", "participacion", "membresias", "resumen"
+    ]
 
-    count = 0
-    for m in re.finditer(core_pattern, text, flags=re.I):
-        i0, i1 = m.span()
-        left = text[max(0, i0 - window):i0]
-        win = text[max(0, i0 - window):min(len(text), i1 + window)]
+    bloque_acad = _find_section(t, sec_acad, stop) or t  # si no encuentra, usamos todo
+    bloque_comp = _find_section(t, sec_comp, stop)
 
-        if any(bad in left for bad in forbid_left):
-            continue
-        if must_in_window and not any(req in win for req in must_in_window):
-            continue
-        count += 1
-    return count
+    # Filtros de falsos positivos
+    NEG_AROUND_DEGREE = r"(jurad|direccion|dir\.|dirig|codirig|comision|comite|evaluac|tesis|tesista)"
+    NEG_COURSE_TOKENS = r"(curso|taller|seminar|diplomatura|otro:|horas|hs|de 0 hasta|entre \d+ y \d+ horas)"
 
-def _count_distinct_isbn(text: str) -> int:
-    # ISBN como proxy robusto de libros / capítulos
-    raw_isbns = re.findall(r"\bisbn[^0-9]*([0-9\- ]{8,20})", text, flags=re.I)
-    clean = set(re.sub(r"[^0-9X]", "", s.upper()) for s in raw_isbns if s.strip())
-    return len(clean)
+    # --- Doctorados (solo en Formación Académica) ---
+    doc_titles = re.findall(
+        rf"(?:doctor(?:ado)?\s+en\s+([a-z0-9 áéíóú\-]+))", bloque_acad, flags=re.I)
+    # limpia frases cortando en fin de línea o punto
+    doc_titles = [re.split(r"[.,;\n]", x)[0] for x in doc_titles]
+    # descarta falsos positivos por seguridad
+    safe_docs = [d for d in doc_titles if not re.search(NEG_AROUND_DEGREE, d)]
+    n_doctorado = len(_unique_titles(safe_docs))
 
-# ---------------------------------------------------------------------
-# Detectores por ítem
-# (solo devuelven "unidades"; los puntos y topes los maneja scoring.py)
-# ---------------------------------------------------------------------
+    # --- Maestrías/Magíster (solo en Formación Académica) ---
+    m_titles = re.findall(
+        rf"(?:maestr[ií]a|magister)\s+en\s+([a-z0-9 áéíóú\-]+)", bloque_acad, flags=re.I)
+    m_titles = [re.split(r"[.,;\n]", x)[0] for x in m_titles]
+    m_titles = [m for m in m_titles if not re.search(NEG_COURSE_TOKENS, m)]
+    n_maestria = len(_unique_titles(m_titles))
 
-# --- Formación --------------------------------------------------------
-def _count_doctorados(text: str) -> int:
-    core = r"\bdoctorad[oa]\b|\bph\.?d\b"
-    must = ["titulo", "egres", "obtuvo", "acredit", "universidad", "resol", "res.", "facultad", "anio", "año", "20", "19"]
-    forbid = ["director", "coordinador", "comite", "comité", "jurado", "docente", "catedra", "cohorte"]
-    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=90)
+    # --- Especializaciones (solo en Formación Académica) ---
+    e_titles = re.findall(
+        rf"(?:especialista?|especializacion)\s+en\s+([a-z0-9 áéíóú\-]+)", bloque_acad, flags=re.I)
+    e_titles = [re.split(r"[.,;\n]", x)[0] for x in e_titles]
+    e_titles = [e for e in e_titles if not re.search(NEG_COURSE_TOKENS, e)]
+    n_espec = len(_unique_titles(e_titles))
 
-def _count_maestrias(text: str) -> int:
-    core = r"\bmaestr(i|í)a\b|\bmagister\b|\bm\.?sc\b"
-    must = ["titulo", "egres", "obtuvo", "acredit", "universidad", "resol", "facultad", "diploma", "20", "19"]
-    forbid = ["director", "coordinador", "comite", "comité", "jurado", "docente", "programa", "curso", "materia"]
-    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=90)
+    # --- Segundo título de grado (si hay >=2 carreras de grado explícitas) ---
+    # señales típicas: Licenciado/a en ..., Profesor en ..., Bioquímico, Ingeniero ...
+    grado_matches = re.findall(
+        r"(?:licenciad[oa]\s+en\s+[a-z0-9 áéíóú\-]+|profesor\s+en\s+[a-z0-9 áéíóú\-]+|ingenier[oa]\s+en\s+[a-z0-9 áéíóú\-]+)",
+        bloque_acad, flags=re.I)
+    n_seg_grado = 1 if len(_unique_titles(grado_matches)) >= 2 else 0
 
-def _count_especializaciones(text: str) -> int:
-    core = r"\bespecializacion\b|\bespecializaci[oó]n\b"
-    must = ["titulo", "egres", "obtuvo", "universidad", "resol", "acredit", "diploma", "20", "19"]
-    forbid = ["curso", "director", "coordinador", "comite", "docente", "programa"]
-    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=90)
+    # --- Cursos de posgrado (>40h) (van en Formación complementaria) ---
+    cursos_pos = 0
+    if bloque_comp:
+        # Busca cursos en comp con indicios de carga horaria
+        for line in bloque_comp.split("\n"):
+            if re.search(r"(curso|taller|seminar|diplomatura|actualizacion)", line):
+                if re.search(r"(?:\b>\s*40\s*hs\b|\b40\s*horas|\b51\s*y\s*100\s*horas|\b101\s*y\s*200\s*horas|\b201\s*y\s*359\s*horas)",
+                             line):
+                    cursos_pos += 1
 
-def _count_diplomaturas(text: str) -> int:
-    # >200 hs: buscamos “diplomatura” + horas o certificado
-    blocks = re.findall(r"(diplomatura[^\n]{0,120})", text, flags=re.I)
-    c = 0
-    for b in blocks:
-        if re.search(r"(200|300|400)\s*h", b) or re.search(r"certificad", b):
-            c += 1
-    return c
+    # --- Libros con ISBN (únicos) ---
+    # busca ISBN10/13; evita confundir ISSN
+    isbn_set = set(re.findall(r"\b97[89][- ]?\d{1,5}[- ]?\d{1,7}[- ]?\d{1,7}[- ]?\d\b|\b\d{9}[0-9xX]\b", t))
+    # limpia posibles capturas de ISSN
+    isbn_set = {i for i in isbn_set if "issn" not in t[max(0, t.find(i)-10): t.find(i)+10]}
+    n_libros = len(isbn_set)
 
-def _count_segundo_grado(text: str) -> int:
-    # Segundo título de grado: buscamos otra carrera de grado con “titulo/egreso” y Universidad
-    # Heurística conservadora (0, 1 o 2 normalmente).
-    pats = re.findall(r"(licenciatura|abogacia|abogac[ií]a|ingenier[ií]a|contador|medicina|arquitectura)", text)
-    # evitamos contar menciones docentes o de cargos
-    base = _find_with_context(
-        text,
-        r"(licenciatura|ingenier[ií]a|contador|medicina|arquitectura|abogac[ií]a|profesorado)\b",
-        must_in_window=["titulo", "egres", "obtuvo", "universidad", "facultad", "diploma", "resol"],
-        forbid_left=["docente", "catedra", "adjunto", "titular"],
-        window=90,
-    )
-    return max(0, base - 1)  # descontamos el primero (requisito de ingreso)
+    # --- Artículos con referato (muy conservador) ---
+    # Busca “artículo/article/paper” + pista de revista (journal/revista/ISSN/JCR/Scopus/WoS)
+    art_refs = re.findall(
+        r"(?:art[ií]culo|article|paper).{0,120}?(?:revista|journal|issn|jcr|scopus|wos|indexed)",
+        t, flags=re.I | re.S)
+    n_art_ref = len(art_refs)
 
-def _count_cursos_posgrado(text: str) -> int:
-    # contabiliza cursos >40 hs con evaluación
-    blocks = re.findall(r"(curso[^\n]{0,120})", text)
-    c = 0
-    for b in blocks:
-        if re.search(r"(posgrado|pos-grado|postgrado)", b) and \
-           (re.search(r">?\s*40\s*h", b) or re.search(r"evalua", b)):
-            c += 1
-    return c
+    # --- Capítulos (capítulo de libro cerca de ISBN o editorial) ---
+    cap_refs = re.findall(
+        r"cap[ií]tulo.{0,80}?(?:isbn|editorial|en:)", t, flags=re.I | re.S)
+    n_capitulos = len(cap_refs)
 
-def _count_posdoc(text: str) -> int:
-    return _find_with_context(text, r"\bposdoc|posdoctorad[oa]\b", must_in_window=["acredit", "universidad", "institut", "20", "19"], window=90)
+    # --- Documentos/Informes técnicos ---
+    doc_tecnicos = re.findall(r"(?:informe|documento)s?\s+t[eé]cnic", t, flags=re.I)
+    n_doc_tecnicos = len(doc_tecnicos)
 
-def _count_idiomas(text: str) -> int:
-    return _find_with_context(text, r"\b(b2|c1|c2|intermedio|avanzado|upper)\b", must_in_window=["certif", "idioma", "examen", "cambridge", "ielts", "toefl"], window=60)
+    # --- Premios/Distinciones (nacionales/internacionales) ---
+    premios = re.findall(r"(?:premio|distinci[oó]n|accesit|menci[oó]n)", t, flags=re.I)
+    n_premios = len(premios)
 
-def _count_estancias(text: str) -> int:
-    return _find_with_context(text, r"\b(estancia|pasant[ií]a)\b", must_in_window=["i+d", "investigacion", "investigación", "laboratorio", "centro", "universidad"], window=90)
+    # --- Redes/Membresías ---
+    redes = re.findall(r"(?:red|membres[ií]a|membership|agency|agencia)\b", t, flags=re.I)
+    n_redes = len(redes)
 
-# --- Cargos (detectamos de manera conservadora) -----------------------
-def _count_docencia_por_rango(text: str, rango: str) -> int:
-    return _find_with_context(text, rf"\b{rango}\b", must_in_window=["docente", "catedra", "universidad", "cargo"], window=50)
+    # --- Resultado con claves esperadas por la app ---
+    return {
+        # Formación
+        "formacion:doctorado": n_doctorado,
+        "formacion:maestria": n_maestria,
+        "formacion:especializacion": n_espec,
+        "formacion:diplomatura": 1 if re.search(r"diplomatura", t) else 0,
+        "formacion:segundo_grado": n_seg_grado,
+        "formacion:cursos_posgrado": cursos_pos,
 
-def _count_docencia_titular(text: str) -> int:  return _count_docencia_por_rango(text, "titular")
-def _count_docencia_asociado(text: str) -> int: return _count_docencia_por_rango(text, "asociad[oa]")
-def _count_docencia_adjunto(text: str) -> int:  return _count_docencia_por_rango(text, "adjunt[oa]")
-def _count_docencia_aux(text: str) -> int:      return _count_docencia_por_rango(text, "ayudante|jtp")
+        # Cargos y CyT (estos son ejemplos mínimos; tu scoring topa luego)
+        "gestion:rector": len(re.findall(r"\brector", t)),
+        "gestion:decano": len(re.findall(r"\bdecano", t)),
+        "eval:institucional": len(re.findall(r"evaluaci[oó]n institucional", t)),
 
-def _count_docencia_posgrado(text: str) -> int:
-    return _find_with_context(text, r"\b(curso|seminario)\b", must_in_window=["posgrado", "maestr", "doctorado"], window=80)
+        # Producciones
+        "pubs:con_referato": n_art_ref,
+        "pubs:sin_referato": 0,  # si querés diferenciar, agregamos otra heurística
+        "pubs:libros": n_libros,
+        "pubs:capitulos": n_capitulos,
+        "pubs:documentos": n_doc_tecnicos,
 
-def _count_gestion(text: str, palabra: str) -> int:
-    return _find_with_context(text, rf"\b{palabra}\b", must_in_window=["universidad", "facultad", "instituto", "secretaria", "resol"], window=80)
+        # Redes / premios (como “otros”)
+        "redes:membresias": n_redes,
+        "premios:total": n_premios,
+    }
 
-# --- CyT (resumen, conservador) --------------------------------------
-def _count_eval_revistas(text: str) -> int:
-    return _find_with_context(text, r"\b(reviewer|evaluador|arbitro|arbitra|peer review)\b", must_in_window=["revista", "journal", "congreso"], window=80)
-
-def _count_eval_proyectos(text: str) -> int:
-    return _find_with_context(text, r"\bevaluac", must_in_window=["proyecto", "i+d", "agencia", "conicet", "fondo"], window=80)
-
-def _count_eval_institucional(text: str) -> int:
-    return _find_with_context(text, r"\bevaluac", must_in_window=["institucion", "institucional", "acreditac"], window=80)
-
-# --- Producciones -----------------------------------------------------
-def _count_articulos_con_referato(text: str) -> int:
-    core = r"\b(articulo|article|paper)\b"
-    must = ["referat", "arbitra", "indexad", "scopus", "wos", "isi", "jcr", "sci", "journal", "revista", "issn", "doi"]
-    forbid = ["proyecto", "programa"]  # para evitar referencias indirectas
-    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=120)
-
-def _count_articulos_sin_referato(text: str) -> int:
-    core = r"\b(articulo|article|paper)\b"
-    must = ["revista", "journal", "public", "issn"]
-    return _find_with_context(text, core, must_in_window=must, window=120) - _count_articulos_con_referato(text)
-
-def _count_libros(text: str) -> int:
-    # Preferimos ISBN; si no hay, buscamos “libro” + editorial
-    by_isbn = _count_distinct_isbn(text)
-    if by_isbn > 0:
-        return by_isbn
-    return _find_with_context(text, r"\blibro\b", must_in_window=["editorial", "isbn", "capitulo", "autor"], window=80)
-
-def _count_capitulos(text: str) -> int:
-    raw = _find_with_context(text, r"\bcap[ií]tulo\b", must_in_window=["libro", "isbn", "editorial"], window=100)
-    # si contamos libros por ISBN, evitamos inflar con capítulos del mismo libro
-    # (heurística simple: como mínimo no superamos libros*10)
-    return raw
-
-def _count_documentos_tecnicos(text: str) -> int:
-    return _find_with_context(text, r"\b(informe|documento|reporte|manual|gu[ií]a)\b", must_in_window=["tecnic", "tecnico", "tecnica", "institucional", "difusion"], window=100)
-
-# --- Redes / Premios / Otros -----------------------------------------
-def _count_redes(text: str) -> int:
-    return _find_with_context(text, r"\bred(es)?\b", must_in_window=["academ", "cient", "profesional", "miembro", "particip"], window=80)
-
-def _count_eventos(text: str) -> int:
-    return _find_with_context(text, r"\b(organizador|comite|comite cientifico|coordinador)\b", must_in_window=["congreso", "jornada", "seminario"], window=80)
-
-def _count_editorial(text: str) -> int:
-    return _find_with_context(text, r"\b(editor|comite editorial)\b", must_in_window=["revista", "journal"], window=80)
-
-def _count_premios_int(text: str) -> int:
-    return _find_with_context(text, r"\bpremio\b", must_in_window=["internacional", "international"], window=80)
-
-def _count_premios_nac(text: str) -> int:
-    # restringimos para no contar cada mención de un programa
-    return _find_with_context(text, r"\bpremio\b", must_in_window=["nacional", "argentina", "mendoza", "ministerio", "secretaria"], window=80)
-
-def _count_premios_otros(text: str) -> int:
-    return _find_with_context(text, r"\bdistinci[oó]n|menci[oó]n\b", must_in_window=["premio", "reconoc"], window=80)
-
-# ---------------------------------------------------------------------
-# Mapa de
+# --- API “extract_text” + “detect_counts” ya es lo que usa streamlit_app.py ---
