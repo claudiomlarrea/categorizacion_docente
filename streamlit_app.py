@@ -1,11 +1,10 @@
 import streamlit as st
 import pandas as pd
-from pathlib import Path
 
 # Módulos del proyecto
 from scoring import RULES, SECTION_LIMITS, sum_with_section_caps
 from parsers import extract_text, detect_counts, PDFSupportMissing
-from report import build_docx_report
+from report import build_docx_report  # si no lo usás, podés comentar estas 2 líneas
 
 # ---------------------------------------------------------------------
 # Configuración de página
@@ -32,11 +31,10 @@ with st.expander("📋 Instrucciones", expanded=True):
     )
 
 # ---------------------------------------------------------------------
-# Función de cálculo de puntajes a partir de los conteos detectados
+# Cálculo de puntajes a partir de conteos detectados
 # ---------------------------------------------------------------------
 def compute_scores(counts: dict):
-    item_rows = []
-    # Suma por sección (las claves de sección son la parte antes de ":")
+    rows = []
     section_totals = {}
 
     for key, rule in RULES.items():
@@ -47,7 +45,7 @@ def compute_scores(counts: dict):
 
         section_totals[section] = section_totals.get(section, 0.0) + capped_points
 
-        item_rows.append({
+        rows.append({
             "Clave": key,
             "Sección": section,
             "Ítem": rule.label,
@@ -57,16 +55,16 @@ def compute_scores(counts: dict):
             "Puntos (tope ítem)": capped_points,
         })
 
-    # Ejemplo de tope por sección si existe en SECTION_LIMITS
+    # Topes por sección (si están definidos)
     for sec, limit in SECTION_LIMITS.items():
         if sec in section_totals:
             section_totals[sec] = min(section_totals[sec], limit)
 
-    totals = sum_with_section_caps(section_totals)  # devuelve 2:,3:,4:,5:,6: y TOTAL_GENERAL
-    return pd.DataFrame(item_rows), totals
+    totals = sum_with_section_caps(section_totals)
+    return pd.DataFrame(rows), totals
 
 # ---------------------------------------------------------------------
-# Uploader (hotfix para que siempre quede visible)
+# Uploader (si no hay archivo, frenamos aquí)
 # ---------------------------------------------------------------------
 st.subheader("Subí tu CV")
 uploaded = st.file_uploader(
@@ -75,23 +73,27 @@ uploaded = st.file_uploader(
     accept_multiple_files=False,
     key="cv_uploader",
 )
-
-# Si no hay archivo, detenemos la ejecución aquí para que el uploader no desaparezca
 if uploaded is None:
     st.info("👉 Elegí un archivo (.docx recomendado).")
     st.stop()
 
 # ---------------------------------------------------------------------
-# Procesamiento del archivo
+# Procesamiento del archivo (compatible con parsers.extract_text(bytes, filename))
 # ---------------------------------------------------------------------
 try:
-    tmp_path = Path("/tmp") / uploaded.name
-    tmp_path.write_bytes(uploaded.getbuffer())
+    file_bytes = bytes(uploaded.getbuffer())
+    filename = uploaded.name
 
-    text, kind = extract_text(str(tmp_path))
+    # NUEVO: el parser espera (bytes, filename) y devuelve texto normalizado
+    text = extract_text(file_bytes, filename)
+
+    # Deducimos el “kind” solo para mostrar
+    ext = (filename.split(".")[-1] or "").lower()
+    kind = ext if ext in ("docx", "pdf", "txt") else "archivo"
+
     st.success(f"Archivo leído como **{kind.upper()}** – longitud: {len(text)} caracteres")
 
-    # Detectar conteos y calcular puntajes
+    # Detectores + puntajes
     counts = detect_counts(text)
     df_items, totals = compute_scores(counts)
 
@@ -121,7 +123,7 @@ try:
         use_container_width=True,
     )
 
-    # Informe Word
+    # Informe Word (opcional)
     with st.expander("📄 Generar informe en Word", expanded=True):
         col1, col2 = st.columns(2)
         docente = col1.text_input("Nombre del docente (opcional)")
@@ -140,9 +142,8 @@ try:
             use_container_width=True,
         )
 
-    # Debug opcional
     with st.expander("🔧 Debug: Conteos detectados", expanded=False):
-        st.json({"how_read": kind, "counts": counts})
+        st.json(counts)
 
 except PDFSupportMissing:
     st.error(
