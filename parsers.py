@@ -1,260 +1,239 @@
-import re, unicodedata, zipfile
-from typing import Dict, Tuple
+# parsers.py
+# v2025-09-29 — Reglas estrictas para Formación y mejor detección de Producciones.
 
-# ---------------- Exceptions ----------------
+from __future__ import annotations
+import io, re, unicodedata
+from typing import List, Tuple, Dict
+import pandas as pd
+
+# ---------------------------------------------------------------------
+# Excepción para soporte PDF opcional (la usa streamlit_app.py)
+# ---------------------------------------------------------------------
 class PDFSupportMissing(Exception):
-    """Se lanza cuando se intenta leer PDF sin pdfplumber instalado."""
     pass
 
-# ---------------- Normalización -------------
-def _normalize(s: str) -> str:
-    s = s.replace("\xa0", " ")  # NBSP
-    s = unicodedata.normalize("NFD", s).encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"[ \t]+", " ", s.lower())
-    s = re.sub(r"\r?\n\s*\r?\n+", "\n", s).strip()
+# ---------------------------------------------------------------------
+# Normalización de texto
+# ---------------------------------------------------------------------
+def _strip_accents(s: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", s)
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
+
+def _norm(s: str) -> str:
+    s = s.replace("\x0c", "\n")  # saltos de página PDF
+    s = _strip_accents(s)
+    s = s.lower()
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{2,}", "\n", s)
     return s
 
-# ---------------- Lectores -------------------
-def extract_text_from_docx(path: str) -> str:
-    """DOCX robusto: docx2txt (mejor con tablas) -> python-docx (párrafos+tablas) -> XML crudo."""
-    # 1) docx2txt
-    try:
+# ---------------------------------------------------------------------
+# Lectura de archivos
+# ---------------------------------------------------------------------
+def extract_text(uploaded_file) -> Tuple[str, str]:
+    """Devuelve (texto_normalizado, tipo: DOCX|PDF|TXT)."""
+    name = (uploaded_file.name or "").lower()
+    raw = uploaded_file.read()
+
+    if name.endswith(".docx"):
         import docx2txt
-        txt = docx2txt.process(path)
-        if txt and txt.strip():
-            return txt
-    except Exception:
-        pass
-    # 2) python-docx (incluye tablas)
-    try:
-        from docx import Document
-        doc = Document(path)
-        parts = []
-        for p in doc.paragraphs:
-            if p.text and p.text.strip():
-                parts.append(p.text)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    t = (cell.text or "").strip()
-                    if t:
-                        parts.append(t)
-        if parts:
-            return "\n".join(parts)
-    except Exception:
-        pass
-    # 3) XML crudo
-    try:
-        with zipfile.ZipFile(path) as z:
-            xml = z.read("word/document.xml").decode("utf-8", errors="ignore")
-        xml = re.sub(r"</w:p>", "\n", xml)
-        text = re.sub(r"<[^>]+>", "", xml)
-        return text
-    except Exception:
-        return ""
+        text = docx2txt.process(io.BytesIO(raw)) or ""
+        return _norm(text), "DOCX"
 
-def extract_text_from_pdf(path: str) -> str:
-    try:
-        import pdfplumber  # lazy import; opcional
-    except Exception as e:
-        raise PDFSupportMissing("pdfplumber no esta instalado.") from e
-    texts = []
-    with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            texts.append(page.extract_text() or "")
-    return "\n".join(texts)
+    if name.endswith(".pdf"):
+        try:
+            import pdfplumber  # lazy import
+        except Exception as e:
+            raise PDFSupportMissing("pdfplumber_not_installed") from e
+        with pdfplumber.open(io.BytesIO(raw)) as pdf:
+            pages = [(p.extract_text() or "") for p in pdf.pages]
+        return _norm("\n".join(pages)), "PDF"
 
-def extract_text(file_path: str) -> Tuple[str, str]:
-    """Devuelve (texto_normalizado, formato) para .docx/.pdf/.txt"""
-    lower = (file_path or "").lower()
-    if lower.endswith(".docx"):
-        raw = extract_text_from_docx(file_path)
-        return _normalize(raw), "docx"
-    elif lower.endswith(".pdf"):
-        raw = extract_text_from_pdf(file_path)
-        return _normalize(raw), "pdf"
-    elif lower.endswith(".txt"):
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return _normalize(f.read()), "txt"
-    elif lower.endswith(".doc"):
-        raise ValueError("Formato .DOC (Word 97-2003) no soportado. Convertir a .DOCX o PDF.")
-    else:
-        raise ValueError("Formato no soportado. Use .docx, .pdf o .txt")
+    if name.endswith(".txt"):
+        return _norm(raw.decode("utf-8", errors="ignore")), "TXT"
 
-# ---------------- Helpers -------------------
-def _count(rx: str, t: str) -> int:
-    return len(re.findall(rx, t, flags=re.IGNORECASE))
+    if name.endswith(".doc"):
+        # viejo Word 97-2003: no lo procesamos para evitar falsos positivos
+        raise ValueError("Los archivos .doc (97-2003) no se soportan. Convertir a .docx o PDF.")
 
-def _has(rx: str, t: str) -> int:
-    return 1 if re.search(rx, t, flags=re.IGNORECASE) else 0
+    # fallback
+    return _norm(raw.decode("utf-8", errors="ignore")), "TXT"
 
-def _num(rx: str, t: str) -> int:
-    m = re.search(rx, t, flags=re.IGNORECASE)
-    return int(m.group(1)) if m else 0
+# ---------------------------------------------------------------------
+# Utilidades de búsqueda contextual
+# ---------------------------------------------------------------------
+def _find_with_context(
+    text: str,
+    core_pattern: str,
+    must_in_window: List[str] | None = None,
+    forbid_left: List[str] | None = None,
+    window: int = 80,
+) -> int:
+    """
+    Cuenta ocurrencias del patrón principal siempre que:
+      - en la ventana +/- 'window' haya alguna palabra obligatoria (must_in_window),
+      - y a la izquierda inmediata NO aparezcan palabras de exclusión (forbid_left).
+    """
+    must_in_window = must_in_window or []
+    forbid_left = forbid_left or []
 
-# ---------------- Detectores -----------------
-def detect_counts(text: str) -> Dict[str, int]:
-    t = _normalize(text)
-    c: Dict[str, int] = {}
+    count = 0
+    for m in re.finditer(core_pattern, text, flags=re.I):
+        i0, i1 = m.span()
+        left = text[max(0, i0 - window):i0]
+        win = text[max(0, i0 - window):min(len(text), i1 + window)]
 
-    # ---------- FORMACION ----------
-    c["formacion:doctorado"] = _has(r"\bdoctorado\b", t)
-    c["formacion:maestria"] = _count(r"\bmaestria\b", t)
-    c["formacion:especializacion"] = _count(r"\bespecializacion\b", t)
-    c["formacion:diplomatura"] = _count(r"\bdiplomatura\b", t)
-    c["formacion:segundo_grado"] = _has(r"segundo titulo de grado|doble titulo de grado", t)
-    c["formacion:cursos_posgrado"] = _num(r"(?:cursos? de (?:pos|post)grado|cursos? de especializacion).*?(\d+)", t)
-    c["formacion:posdoc"] = _count(r"\bposdoc(?:torado)?\b", t)
-    c["formacion:idiomas"] = _count(r"\bidioma[s]?\b|ingles certificado|toefl|ielts|b2|c1|c2", t)
-    c["formacion:estancias"] = _num(r"(?:estancia|pasantia)[^0-9]{0,20}(\d+)", t) or _count(r"\bestancia\b|\bpasantia\b", t)
+        if any(bad in left for bad in forbid_left):
+            continue
+        if must_in_window and not any(req in win for req in must_in_window):
+            continue
+        count += 1
+    return count
 
-    # ---------- DOCENCIA ----------
-    def _years(rx):
-        m = re.search(rx, t)
-        return int(m.group(1)) if m else 0
-    c["docencia:titular"] = _years(r"titular[^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
-    c["docencia:asociado"] = _years(r"asociad[oa][^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
-    c["docencia:adjunto"] = _years(r"adjunt[oa][^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
-    c["docencia:jtp"] = _years(r"(?:trabajos practicos|ayudante)[^0-9]{0,20}(\d+)\s*a(?:n|ñ)os?")
-    c["docencia:posgrado"] = _years(r"posgrado[^0-9]{0,20}(\d+)\s*cursos?")
+def _count_distinct_isbn(text: str) -> int:
+    # ISBN como proxy robusto de libros / capítulos
+    raw_isbns = re.findall(r"\bisbn[^0-9]*([0-9\- ]{8,20})", text, flags=re.I)
+    clean = set(re.sub(r"[^0-9X]", "", s.upper()) for s in raw_isbns if s.strip())
+    return len(clean)
 
-    # ---------- GESTION ----------
-    c["gestion:rector"] = _has(r"\brector(?:a|ado)?\b", t)
-    c["gestion:vicerrector"] = _has(r"\bvicerrector(?:a)?\b|directorio", t)
-    c["gestion:decano"] = _has(r"\bdecano\b|director[ae] de facultad|director instituto", t)
-    c["gestion:secretario"] = _has(r"secretari[oa] (academica|de investigacion|de extension)", t)
-    c["gestion:coordinador"] = _has(r"coordinador[ae] de carrera|responsable de programas", t)
-    c["gestion:consejero"] = _has(r"consejer[oa] (superior|directivo|de facultad)", t)
+# ---------------------------------------------------------------------
+# Detectores por ítem
+# (solo devuelven "unidades"; los puntos y topes los maneja scoring.py)
+# ---------------------------------------------------------------------
 
-    # ---------- OTROS CARGOS ----------
-    c["otroscargos:funciones"] = _num(r"comisiones? internas?[^0-9]{0,20}(\d+)\s*funciones?", t) or _count(r"comision interna", t)
+# --- Formación --------------------------------------------------------
+def _count_doctorados(text: str) -> int:
+    core = r"\bdoctorad[oa]\b|\bph\.?d\b"
+    must = ["titulo", "egres", "obtuvo", "acredit", "universidad", "resol", "res.", "facultad", "anio", "año", "20", "19"]
+    forbid = ["director", "coordinador", "comite", "comité", "jurado", "docente", "catedra", "cohorte"]
+    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=90)
 
-    # ---------- FORMACION RRHH ----------
-    c["ciencia:dir_doctorandos"] = _num(r"direccion de (\d+) doctorand", t)
-    c["ciencia:dir_maestria"] = _num(r"direccion de (\d+) maestrand", t)
-    c["ciencia:dir_grado"] = _num(r"direccion de (\d+) tesis(?:tas)? de grado", t)
-    c["ciencia:becarios"] = _num(r"(\d+)\s*becarios? (?:conicet|agencia)", t)
+def _count_maestrias(text: str) -> int:
+    core = r"\bmaestr(i|í)a\b|\bmagister\b|\bm\.?sc\b"
+    must = ["titulo", "egres", "obtuvo", "acredit", "universidad", "resol", "facultad", "diploma", "20", "19"]
+    forbid = ["director", "coordinador", "comite", "comité", "jurado", "docente", "programa", "curso", "materia"]
+    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=90)
 
-    # ---------- PROYECTOS ----------
-    c["proyectos:direccion"] = _num(r"(?:direccion|dir\.) de (\d+) proyectos?", t)
-    c["proyectos:codireccion"] = _num(r"co-?direccion de (\d+) proyectos?", t)
-    c["proyectos:participacion"] = _num(r"participacion en (\d+) proyectos?", t)
-    c["proyectos:coordinacion"] = _num(r"coordinacion de (\d+) equipo", t)
+def _count_especializaciones(text: str) -> int:
+    core = r"\bespecializacion\b|\bespecializaci[oó]n\b"
+    must = ["titulo", "egres", "obtuvo", "universidad", "resol", "acredit", "diploma", "20", "19"]
+    forbid = ["curso", "director", "coordinador", "comite", "docente", "programa"]
+    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=90)
 
-    # ---------- EXTENSION ----------
-    c["extension:tutorias"] = _num(r"tutorias? de (\d+) pasant", t)
-    c["extension:transferencia"] = _num(r"(\d+)\s*(?:actividades?|acciones?) de transferencia", t)
-    c["extension:eventos_cientificos"] = _num(r"(\d+)\s*(?:conferencias?|panel(?:es)?|exposiciones?)", t)
-
-    # ---------- EVALUACION ----------
-    c["eval:tribunal_grado"] = _num(r"jurado de (\d+) tesis de grado", t)
-    c["eval:tribunal_posgrado"] = _num(r"jurado de (\d+) tesis de posgrado", t)
-    c["eval:eval_revistas"] = max(
-        _num(r"evaluador(?:a)? de (\d+) (?:revistas?|congresos?|jornadas?)", t),
-        _count(r"\b(revisor|arbitro|reviewer)\b", t)
-    )
-    c["eval:eval_proyectos"] = max(
-        _num(r"evaluador(?:a)? de (\d+) proyectos?\s*(?:i\+d|investigacion)?", t),
-        _count(r"\bevaluador(?:a)? de proyectos\b", t)
-    )
-    c["eval:eval_institucional"] = max(
-        _num(r"evaluacion institucional.*?(\d+)", t),
-        _count(r"\bevaluacion institucional\b", t)
-    )
-
-    # ---------- OTRAS ACTIVIDADES ----------
-    c["otras:comites_redes"] = max(
-        _num(r"participacion en (\d+) redes", t),
-        _count(r"red(?:es)? academicas?|comite(s)?", t)
-    )
-    c["otras:ejercicio_prof"] = _num(r"extraacademico.*?(\d+)\s*a(?:n|ñ)os?", t)
-
-    # ---------- PUBLICACIONES (PRODUCCIONES) ----------
-    # Heurísticas robustas para CVs: DOI/ISSN/ISBN por línea, sin exigir la palabra "articulo".
-    lines = t.split("\n")
-
-    # DOIs únicos (muy confiables para artículos)
-    dois = set(re.findall(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+\b", t, flags=re.I))
-
-    # ISBN y ISSN marcados
-    # (permitimos espacios entre letras en PDFs raros: i s b n / i s s n)
-    isbn_token = re.compile(r"i\s*s\s*b\s*n", re.I)
-    issn_token = re.compile(r"i\s*s\s*s\s*n", re.I)
-
-    libro_count = 0
-    cap_count = 0
-    issn_lines = 0
-
-    for ln in lines:
-        has_isbn = bool(isbn_token.search(ln))
-        has_issn = bool(issn_token.search(ln))
-        if has_isbn:
-            if re.search(r"\bcapitul|chapter\b", ln, flags=re.I):
-                cap_count += 1
-            else:
-                libro_count += 1
-        if has_issn:
-            # Evito confundir con líneas de libro que traigan ISSN incidental
-            if not has_isbn and not re.search(r"\bcapitul|chapter|libro\b", ln, flags=re.I):
-                issn_lines += 1
-
-    # Artículos con referato: preferimos DOIs, si no ISSN por línea,
-    # y como respaldo, líneas con 'journal|revista' sin ISBN.
-    journal_lines = 0
-    for ln in lines:
-        if re.search(r"\b(journal|revista)\b", ln, flags=re.I) and not isbn_token.search(ln):
-            journal_lines += 1
-
-    c["pubs:con_referato"] = max(len(dois), issn_lines, journal_lines)
-
-    # Artículos sin referato: palabras clave típicas
-    c["pubs:sin_referato"] = max(
-        _num(r"(\d+)\s*articulos?\s*sin\s*referato", t),
-        _count(r"(divulgacion|boletin|articulo de opinion|nota periodistica)", t)
-    )
-
-    # Libros y capítulos por ISBN en línea
-    c["pubs:libros"] = libro_count
-    c["pubs:capitulos"] = cap_count
-
-    # Documentos técnicos / informes
-    c["pubs:documentos"] = max(
-        _num(r"(\d+)\s*(?:documentos?|informes?)\s*tecnicos?", t),
-        _count(r"(informe|documento|manual|guia).{0,20}tecnic", t)
-    )
-
-    # ---------- DESARROLLOS ----------
-    c["desarrollos:software_patente"] = max(
-        _num(r"(\d+)\s*softwares?\s*registrados?", t),
-        _num(r"(\d+)\s*patentes?", t)
-    )
-    c["desarrollos:procesos"] = _num(r"(\d+)\s*procesos?\s*de\s*gestion", t)
-
-    # ---------- SERVICIOS ----------
-    c["servicios:tecnicos"] = _num(r"(\d+)\s*servicios?\s*tecnicos?", t)
-    c["servicios:informes"] = _num(r"(\d+)\s*informes?\s*tecnicos?", t)
-
-    # ---------- REDES / EDITORIAL / EVENTOS ----------
-    c["redes:participacion"] = max(
-        _num(r"miembro de (\d+) redes?", t),
-        _count(r"\b(membresia|miembro|socio|asociado|integrante)\b", t)
-    )
-    c["redes:organizacion_eventos"] = max(
-        _num(r"organizacion de (\d+) (?:congresos?|jornadas?|seminarios?)", t),
-        _count(r"(comite (?:organizador|cientifico)|coordinacion) de (?:congreso|jornada|seminario|evento)", t)
-    )
-    c["redes:gestion_editorial"] = max(
-        _num(r"comite editorial de (\d+) revistas?", t),
-        _count(r"\b(editor(?:a)?(?: asociado[a]?| en jefe)?|comite editorial)\b", t)
-    )
-
-    # ---------- PREMIOS ----------
-    total_premios = _count(r"\bpremio[s]?\b|\bdistincion(?:es)?\b|\bmencion(?:es)?\b|\breconocimiento[s]?\b", t)
-    premios_int = _count(r"\binternac", t)
-    premios_nac = _count(r"\bnacional", t)
-    c["premios:internacional"] = premios_int
-    c["premios:nacional"] = max(premios_nac - premios_int, 0)
-    resto = max(total_premios - c["premios:internacional"] - c["premios:nacional"], 0)
-    c["premios:distinciones"] = resto
-
+def _count_diplomaturas(text: str) -> int:
+    # >200 hs: buscamos “diplomatura” + horas o certificado
+    blocks = re.findall(r"(diplomatura[^\n]{0,120})", text, flags=re.I)
+    c = 0
+    for b in blocks:
+        if re.search(r"(200|300|400)\s*h", b) or re.search(r"certificad", b):
+            c += 1
     return c
+
+def _count_segundo_grado(text: str) -> int:
+    # Segundo título de grado: buscamos otra carrera de grado con “titulo/egreso” y Universidad
+    # Heurística conservadora (0, 1 o 2 normalmente).
+    pats = re.findall(r"(licenciatura|abogacia|abogac[ií]a|ingenier[ií]a|contador|medicina|arquitectura)", text)
+    # evitamos contar menciones docentes o de cargos
+    base = _find_with_context(
+        text,
+        r"(licenciatura|ingenier[ií]a|contador|medicina|arquitectura|abogac[ií]a|profesorado)\b",
+        must_in_window=["titulo", "egres", "obtuvo", "universidad", "facultad", "diploma", "resol"],
+        forbid_left=["docente", "catedra", "adjunto", "titular"],
+        window=90,
+    )
+    return max(0, base - 1)  # descontamos el primero (requisito de ingreso)
+
+def _count_cursos_posgrado(text: str) -> int:
+    # contabiliza cursos >40 hs con evaluación
+    blocks = re.findall(r"(curso[^\n]{0,120})", text)
+    c = 0
+    for b in blocks:
+        if re.search(r"(posgrado|pos-grado|postgrado)", b) and \
+           (re.search(r">?\s*40\s*h", b) or re.search(r"evalua", b)):
+            c += 1
+    return c
+
+def _count_posdoc(text: str) -> int:
+    return _find_with_context(text, r"\bposdoc|posdoctorad[oa]\b", must_in_window=["acredit", "universidad", "institut", "20", "19"], window=90)
+
+def _count_idiomas(text: str) -> int:
+    return _find_with_context(text, r"\b(b2|c1|c2|intermedio|avanzado|upper)\b", must_in_window=["certif", "idioma", "examen", "cambridge", "ielts", "toefl"], window=60)
+
+def _count_estancias(text: str) -> int:
+    return _find_with_context(text, r"\b(estancia|pasant[ií]a)\b", must_in_window=["i+d", "investigacion", "investigación", "laboratorio", "centro", "universidad"], window=90)
+
+# --- Cargos (detectamos de manera conservadora) -----------------------
+def _count_docencia_por_rango(text: str, rango: str) -> int:
+    return _find_with_context(text, rf"\b{rango}\b", must_in_window=["docente", "catedra", "universidad", "cargo"], window=50)
+
+def _count_docencia_titular(text: str) -> int:  return _count_docencia_por_rango(text, "titular")
+def _count_docencia_asociado(text: str) -> int: return _count_docencia_por_rango(text, "asociad[oa]")
+def _count_docencia_adjunto(text: str) -> int:  return _count_docencia_por_rango(text, "adjunt[oa]")
+def _count_docencia_aux(text: str) -> int:      return _count_docencia_por_rango(text, "ayudante|jtp")
+
+def _count_docencia_posgrado(text: str) -> int:
+    return _find_with_context(text, r"\b(curso|seminario)\b", must_in_window=["posgrado", "maestr", "doctorado"], window=80)
+
+def _count_gestion(text: str, palabra: str) -> int:
+    return _find_with_context(text, rf"\b{palabra}\b", must_in_window=["universidad", "facultad", "instituto", "secretaria", "resol"], window=80)
+
+# --- CyT (resumen, conservador) --------------------------------------
+def _count_eval_revistas(text: str) -> int:
+    return _find_with_context(text, r"\b(reviewer|evaluador|arbitro|arbitra|peer review)\b", must_in_window=["revista", "journal", "congreso"], window=80)
+
+def _count_eval_proyectos(text: str) -> int:
+    return _find_with_context(text, r"\bevaluac", must_in_window=["proyecto", "i+d", "agencia", "conicet", "fondo"], window=80)
+
+def _count_eval_institucional(text: str) -> int:
+    return _find_with_context(text, r"\bevaluac", must_in_window=["institucion", "institucional", "acreditac"], window=80)
+
+# --- Producciones -----------------------------------------------------
+def _count_articulos_con_referato(text: str) -> int:
+    core = r"\b(articulo|article|paper)\b"
+    must = ["referat", "arbitra", "indexad", "scopus", "wos", "isi", "jcr", "sci", "journal", "revista", "issn", "doi"]
+    forbid = ["proyecto", "programa"]  # para evitar referencias indirectas
+    return _find_with_context(text, core, must_in_window=must, forbid_left=forbid, window=120)
+
+def _count_articulos_sin_referato(text: str) -> int:
+    core = r"\b(articulo|article|paper)\b"
+    must = ["revista", "journal", "public", "issn"]
+    return _find_with_context(text, core, must_in_window=must, window=120) - _count_articulos_con_referato(text)
+
+def _count_libros(text: str) -> int:
+    # Preferimos ISBN; si no hay, buscamos “libro” + editorial
+    by_isbn = _count_distinct_isbn(text)
+    if by_isbn > 0:
+        return by_isbn
+    return _find_with_context(text, r"\blibro\b", must_in_window=["editorial", "isbn", "capitulo", "autor"], window=80)
+
+def _count_capitulos(text: str) -> int:
+    raw = _find_with_context(text, r"\bcap[ií]tulo\b", must_in_window=["libro", "isbn", "editorial"], window=100)
+    # si contamos libros por ISBN, evitamos inflar con capítulos del mismo libro
+    # (heurística simple: como mínimo no superamos libros*10)
+    return raw
+
+def _count_documentos_tecnicos(text: str) -> int:
+    return _find_with_context(text, r"\b(informe|documento|reporte|manual|gu[ií]a)\b", must_in_window=["tecnic", "tecnico", "tecnica", "institucional", "difusion"], window=100)
+
+# --- Redes / Premios / Otros -----------------------------------------
+def _count_redes(text: str) -> int:
+    return _find_with_context(text, r"\bred(es)?\b", must_in_window=["academ", "cient", "profesional", "miembro", "particip"], window=80)
+
+def _count_eventos(text: str) -> int:
+    return _find_with_context(text, r"\b(organizador|comite|comite cientifico|coordinador)\b", must_in_window=["congreso", "jornada", "seminario"], window=80)
+
+def _count_editorial(text: str) -> int:
+    return _find_with_context(text, r"\b(editor|comite editorial)\b", must_in_window=["revista", "journal"], window=80)
+
+def _count_premios_int(text: str) -> int:
+    return _find_with_context(text, r"\bpremio\b", must_in_window=["internacional", "international"], window=80)
+
+def _count_premios_nac(text: str) -> int:
+    # restringimos para no contar cada mención de un programa
+    return _find_with_context(text, r"\bpremio\b", must_in_window=["nacional", "argentina", "mendoza", "ministerio", "secretaria"], window=80)
+
+def _count_premios_otros(text: str) -> int:
+    return _find_with_context(text, r"\bdistinci[oó]n|menci[oó]n\b", must_in_window=["premio", "reconoc"], window=80)
+
+# ---------------------------------------------------------------------
+# Mapa de
