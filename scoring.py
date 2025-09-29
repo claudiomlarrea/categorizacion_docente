@@ -1,121 +1,148 @@
-
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict
 
+# ---------------------------------------------------------------------
+# Modelo de regla
+# ---------------------------------------------------------------------
 @dataclass
-class ItemRule:
-    key: str
+class Rule:
     label: str
     points_per_unit: float
     max_points: float
 
-RULES = {
-    "formacion:doctorado": ItemRule("formacion:doctorado", "Doctorado acreditado", 250, 375),
-    "formacion:maestria": ItemRule("formacion:maestria", "Maestría acreditada", 150, 225),
-    "formacion:especializacion": ItemRule("formacion:especializacion", "Especialización", 70, 105),
-    "formacion:diplomatura": ItemRule("formacion:diplomatura", "Diplomatura >200 hs", 50, 100),
-    "formacion:segundo_grado": ItemRule("formacion:segundo_grado", "Segundo título de grado", 30, 30),
-    "formacion:cursos_posgrado": ItemRule("formacion:cursos_posgrado", "Cursos de posgrado (>40 hs con evaluación)", 5, 75),
-    "formacion:posdoc": ItemRule("formacion:posdoc", "Posdoctorado acreditado", 100, 100),
-    "formacion:idiomas": ItemRule("formacion:idiomas", "Idiomas certificados (intermedio/avanzado)", 10, 50),
-    "formacion:estancias": ItemRule("formacion:estancias", "Estancias y pasantías en I+D", 20, 60),
+# ---------------------------------------------------------------------
+# Reglas por ítem (clave = "<seccion>:<item>")
+# Ajustá puntos/tope si tu valorador oficial usa otros números.
+# ---------------------------------------------------------------------
+RULES: Dict[str, Rule] = {
+    # ---------------- FORMACION ----------------
+    "formacion:doctorado":       Rule("Doctorado acreditado",                     400, 400),
+    "formacion:maestria":        Rule("Maestría acreditada",                      60, 120),
+    "formacion:especializacion": Rule("Especialización",                          30,  60),
+    "formacion:diplomatura":     Rule("Diplomatura >200 hs",                      50, 100),
+    "formacion:segundo_grado":   Rule("Segundo título de grado",                  30,  30),
+    "formacion:cursos_posgrado": Rule("Cursos de posgrado (>40 hs con evaluación)", 5, 75),
+    "formacion:posdoc":          Rule("Posdoctorado acreditado",                 100, 100),
+    "formacion:idiomas":         Rule("Idiomas certificados (intermedio/avanzado)",10,  50),
+    "formacion:estancias":       Rule("Estancias y pasantías en I+D",             20,  60),
 
-    "docencia:titular": ItemRule("docencia:titular", "Docencia universitaria - Titular (por año)", 30, 150),
-    "docencia:asociado": ItemRule("docencia:asociado", "Docencia universitaria - Asociado (por año)", 25, 125),
-    "docencia:adjunto": ItemRule("docencia:adjunto", "Docencia universitaria - Adjunto (por año)", 20, 100),
-    "docencia:jtp": ItemRule("docencia:jtp", "JTP o Ayudante (por año)", 10, 50),
-    "docencia:posgrado": ItemRule("docencia:posgrado", "Docencia en posgrado (por curso)", 20, 100),
+    # ---------------- DOCENCIA / CARGOS ----------------
+    "docencia:titular":          Rule("Docencia universitaria - Titular (por año)",30, 150),
+    "docencia:asociado":         Rule("Docencia universitaria - Asociado (por año)",20, 120),
+    "docencia:adjunto":          Rule("Docencia universitaria - Adjunto (por año)",15,  90),
+    "docencia:jtp":              Rule("Docencia universitaria - JTP/Ayudante (por año)",10, 60),
+    "docencia:posgrado":         Rule("Docencia de posgrado (cursos/año)",         15,  90),
 
-    "gestion:rector": ItemRule("gestion:rector", "Rector", 100, 100),
-    "gestion:vicerrector": ItemRule("gestion:vicerrector", "Vicerrector/Directorio", 80, 80),
-    "gestion:decano": ItemRule("gestion:decano", "Decano / Director Instituto", 60, 60),
-    "gestion:secretario": ItemRule("gestion:secretario", "Secretario Acad., Inv. o Ext.", 60, 60),
-    "gestion:coordinador": ItemRule("gestion:coordinador", "Coordinador de carrera/programas", 40, 40),
-    "gestion:consejero": ItemRule("gestion:consejero", "Consejero institucional", 20, 20),
+    "gestion:rector":            Rule("Rector/a o Rectorado",                     80,  80),
+    "gestion:vicerrector":       Rule("Vicerrector/a / Directorio",               60,  60),
+    "gestion:decano":            Rule("Decano/a / Dirección de Facultad",         50,  50),
+    "gestion:secretario":        Rule("Secretarías (Acad./Inv./Extensión)",       40,  80),
+    "gestion:coordinador":       Rule("Coordinación de carrera/programas",        20,  60),
+    "gestion:consejero":         Rule("Consejos (superior/directivo)",            10,  40),
 
-    "otroscargos:funciones": ItemRule("otroscargos:funciones", "Funciones especiales (por función)", 10, 50),
+    "otroscargos:funciones":     Rule("Comisiones internas / funciones",           5,  30),
 
-    "ciencia:dir_doctorandos": ItemRule("ciencia:dir_doctorandos", "Dirección de doctorandos/posdocs", 30, 90),
-    "ciencia:dir_maestria": ItemRule("ciencia:dir_maestria", "Dirección de maestrandos", 20, 50),
-    "ciencia:dir_grado": ItemRule("ciencia:dir_grado", "Dirección de tesistas de grado", 10, 50),
-    "ciencia:becarios": ItemRule("ciencia:becarios", "Formación de becarios (CONICET/Agencia)", 20, 40),
+    # ---------------- CyT / RRHH / PROYECTOS / EXTENSIÓN / EVALUACIÓN / OTRAS ----------------
+    "ciencia:dir_doctorandos":   Rule("Dirección de doctorandos",                 40, 120),
+    "ciencia:dir_maestria":      Rule("Dirección de maestrandos",                 20,  80),
+    "ciencia:dir_grado":         Rule("Dirección de tesis de grado",               8,  40),
+    "ciencia:becarios":          Rule("Dirección de becarios (CONICET/Agencia)",  10,  50),
 
-    "proyectos:direccion": ItemRule("proyectos:direccion", "Dirección de proyectos (eval+financ)", 50, 150),
-    "proyectos:codireccion": ItemRule("proyectos:codireccion", "Co-dirección de proyectos", 30, 90),
-    "proyectos:participacion": ItemRule("proyectos:participacion", "Participación en proyectos", 20, 60),
-    "proyectos:coordinacion": ItemRule("proyectos:coordinacion", "Coordinación de equipos", 20, 20),
+    "proyectos:direccion":       Rule("Dirección de proyectos",                   20,  80),
+    "proyectos:codireccion":     Rule("Codirección de proyectos",                 10,  40),
+    "proyectos:participacion":   Rule("Participación en proyectos",                5,  35),
+    "proyectos:coordinacion":    Rule("Coordinación/equipos",                      6,  30),
 
-    "extension:tutorias": ItemRule("extension:tutorias", "Tutorías de pasantías/prácticas", 10, 20),
-    "extension:transferencia": ItemRule("extension:transferencia", "Vinculación/transferencia (acciones)", 15, 45),
-    "extension:eventos_cientificos": ItemRule("extension:eventos_cientificos", "Eventos científicos (expositor/conferencista/panelista)", 20, 100),
+    "extension:tutorias":        Rule("Tutorías/Pasantías (Extensión)",            4,  24),
+    "extension:transferencia":   Rule("Actividades de transferencia",              6,  36),
+    "extension:eventos_cientificos": Rule("Conferencias/charlas/paneles",         3,  30),
 
-    "eval:tribunal_grado": ItemRule("eval:tribunal_grado", "Tribunal de tesis de grado", 5, 20),
-    "eval:tribunal_posgrado": ItemRule("eval:tribunal_posgrado", "Tribunal de tesis de posgrado", 10, 30),
-    "eval:eval_proyectos": ItemRule("eval:eval_proyectos", "Evaluación de proyectos/programas I+D/ext.", 10, 30),
-    "eval:eval_revistas": ItemRule("eval:eval_revistas", "Evaluación en revistas/congresos/jornadas", 10, 30),
-    "eval:eval_institucional": ItemRule("eval:eval_institucional", "Evaluación institucional/organismos I+D", 10, 30),
+    "eval:tribunal_grado":       Rule("Jurado de tesis de grado",                  4,  20),
+    "eval:tribunal_posgrado":    Rule("Jurado de tesis de posgrado",               6,  30),
+    "eval:eval_revistas":        Rule("Evaluación de revistas/congresos",          3,  30),
+    "eval:eval_proyectos":       Rule("Evaluación de proyectos I+D",               4,  24),
+    "eval:eval_institucional":   Rule("Evaluación institucional",                  5,  25),
 
-    "otras:comites_redes": ItemRule("otras:comites_redes", "Participación en redes/comités/eventos", 20, 60),
-    "otras:ejercicio_prof": ItemRule("otras:ejercicio_prof", "Ejercicio profesional extraacadémico (años)", 5, 20),
+    "otras:comites_redes":       Rule("Comités / Redes académicas",                4,  24),
+    "otras:ejercicio_prof":      Rule("Ejercicio profesional extraacadémico (años)",5, 25),
 
-    "pubs:con_referato": ItemRule("pubs:con_referato", "Artículos con referato (indexados)", 20, 140),
-    "pubs:sin_referato": ItemRule("pubs:sin_referato", "Artículos sin referato", 10, 80),
-    "pubs:libros": ItemRule("pubs:libros", "Libros (ISBN)", 40, 80),
-    "pubs:capitulos": ItemRule("pubs:capitulos", "Capítulos de libro (ISBN)", 20, 60),
-    "pubs:documentos": ItemRule("pubs:documentos", "Documentos técnicos/comunicaciones", 10, 30),
+    # ---------------- PRODUCCIONES (Publicaciones) ----------------
+    "pubs:con_referato":         Rule("Artículos con referato/indexados",         20, 200),
+    "pubs:sin_referato":         Rule("Artículos sin referato/divulgación",        5,  50),
+    "pubs:libros":               Rule("Libros con ISBN",                          30,  90),
+    "pubs:capitulos":            Rule("Capítulos de libro",                       15,  60),
+    "pubs:documentos":           Rule("Documentos/Informes técnicos",             10,  40),
 
-    "desarrollos:software_patente": ItemRule("desarrollos:software_patente", "Patentes/soft. registrado", 30, 60),
-    "desarrollos:procesos": ItemRule("desarrollos:procesos", "Procesos de gestión/innovación", 20, 60),
+    # ---------------- DESARROLLOS / SERVICIOS ----------------
+    "desarrollos:software_patente": Rule("Software registrado / Patente",         25, 100),
+    "desarrollos:procesos":      Rule("Procesos de gestión/tecnológicos",         10,  40),
 
-    "servicios:tecnicos": ItemRule("servicios:tecnicos", "Servicios técnicos/profesionales", 20, 40),
-    "servicios:informes": ItemRule("servicios:informes", "Informes técnicos/diagnósticos", 10, 20),
+    "servicios:tecnicos":        Rule("Servicios técnicos",                         6,  36),
+    "servicios:informes":        Rule("Informes técnicos",                          5,  30),
 
-    "redes:participacion": ItemRule("redes:participacion", "Participación en redes", 10, 30),
-    "redes:organizacion_eventos": ItemRule("redes:organizacion_eventos", "Organización de eventos", 20, 60),
-    "redes:gestion_editorial": ItemRule("redes:gestion_editorial", "Gestión editorial (revistas)", 20, 60),
+    # ---------------- REDES / PREMIOS ----------------
+    "redes:participacion":       Rule("Membresías/participación en redes",          4,  24),
+    "redes:organizacion_eventos":Rule("Organización de eventos científicos",        6,  36),
+    "redes:gestion_editorial":   Rule("Gestión editorial / editor/a",               8,  40),
 
-    "premios:internacional": ItemRule("premios:internacional", "Premios internacionales", 50, 100),
-    "premios:nacional": ItemRule("premios:nacional", "Premios nacionales", 20, 100),
-    "premios:distinciones": ItemRule("premios:distinciones", "Menciones/distinciones", 20, 100),
+    "premios:internacional":     Rule("Premios/Distinciones internacionales",      15,  60),
+    "premios:nacional":          Rule("Premios/Distinciones nacionales",            8,  40),
+    "premios:distinciones":      Rule("Otras distinciones/menciones",               5,  25),
 }
 
-SECTION_LIMITS = {
-    "formacion": 400,
-    "docencia": 300,
-    "gestion": 200,
-    "otroscargos": 75,
-    "ciencia": 150,
-    "proyectos": 150,
-    "extension": 60,
-    "eval": 100,
-    "otras": 60,
-    "pubs": 300,
-    "desarrollos": 100,
-    "servicios": 40,
-    "redes": 150,
-    "premios": 100,
+# ---------------------------------------------------------------------
+# Límites por sección (aplican ANTES de armar los bloques 2..6)
+# Ajustalos si tu reglamento usa otros topes.
+# ---------------------------------------------------------------------
+SECTION_LIMITS: Dict[str, float] = {
+    "formacion":     400,
+    "docencia":      160,
+    "gestion":       160,
+    "otroscargos":    40,
+
+    "ciencia":       120,
+    "proyectos":     120,
+    "extension":      60,
+    "eval":           60,
+    "otras":          60,
+
+    "pubs":          200,  # <-- importante: que no sea 0
+    "desarrollos":    80,
+    "servicios":      80,
+
+    "redes":          60,
+    "premios":        60,
 }
 
-GLOBAL_LIMITS = {
-    "3:Cargos_total": 500,
-    "4:CyT_total": 500,
-    "5:Producciones_total": 350,
-    "6:Otros_total": 200,
+# ---------------------------------------------------------------------
+# Bloques del reporte (2..6) -> qué secciones suma cada uno
+# ---------------------------------------------------------------------
+SECTION_GROUPS = {
+    "2:Formacion_total":   ["formacion"],
+    "3:Cargos_total":      ["docencia", "gestion", "otroscargos"],
+    "4:CyT_total":         ["ciencia", "proyectos", "extension", "eval", "otras"],
+    "5:Producciones_total":["pubs", "desarrollos", "servicios"],   # <-- aquí entra PUBS
+    "6:Otros_total":       ["redes", "premios"],
 }
 
-def clamp(value, max_value):
-    return min(value, max_value)
+# ---------------------------------------------------------------------
+# Suma con topes por sección y por bloque
+# ---------------------------------------------------------------------
+def sum_with_section_caps(section_totals: Dict[str, float]) -> Dict[str, float]:
+    # Aseguro topes por sección
+    capped = {}
+    for sec, val in section_totals.items():
+        lim = SECTION_LIMITS.get(sec, float("inf"))
+        capped[sec] = min(val, lim)
 
-def sum_with_section_caps(section_scores: Dict[str, float]) -> Dict[str, Any]:
-    out = dict(section_scores)
-    cargos_total = out.get("docencia",0)+out.get("gestion",0)+out.get("otroscargos",0)
-    out["3:Cargos_total"] = clamp(cargos_total, GLOBAL_LIMITS["3:Cargos_total"])
-    cyt_total = out.get("ciencia",0)+out.get("proyectos",0)+out.get("extension",0)+out.get("eval",0)+out.get("otras",0)
-    out["4:CyT_total"] = clamp(cyt_total, GLOBAL_LIMITS["4:CyT_total"])
-    prod_total = out.get("pubs",0)+out.get("desarrollos",0)+out.get("servicios",0)
-    out["5:Producciones_total"] = clamp(prod_total, GLOBAL_LIMITS["5:Producciones_total"])
-    otros_total = out.get("redes",0)+out.get("premios",0)
-    out["6:Otros_total"] = clamp(otros_total, GLOBAL_LIMITS["6:Otros_total"])
-    out["2:Formacion_total"] = clamp(out.get("formacion",0), SECTION_LIMITS["formacion"])
-    out["TOTAL_GENERAL"] = out["2:Formacion_total"] + out["3:Cargos_total"] + out["4:CyT_total"] + out["5:Producciones_total"] + out["6:Otros_total"]
+    # Armo subtotales por bloque 2..6
+    out = {}
+    for block, secs in SECTION_GROUPS.items():
+        out[block] = sum(capped.get(s, 0.0) for s in secs)
+
+    # Total general
+    out["TOTAL_GENERAL"] = sum(out.get(k, 0.0) for k in [
+        "2:Formacion_total", "3:Cargos_total", "4:CyT_total",
+        "5:Producciones_total", "6:Otros_total"
+    ])
     return out
